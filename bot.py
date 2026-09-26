@@ -9,14 +9,15 @@ import re
 import aiohttp
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Токен, ID администратора и реквизиты
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬТЕ_ТОКЕН_ВТОРОГО_БОТА_ОТ_BOTFATHER")
+# Токен нового бота, ваш постоянный ADMIN_ID и новые платежные данные
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8401540210:AAHVVVmQbSbcI9Fod-eirg7pWzqs8ioOHpM")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "688074424"))
 
 PAYMENT_DETAILS = (
@@ -29,7 +30,7 @@ PAYMENT_DETAILS = (
 
 DB_PATH = "courses.db"
 
-# Ссылка на вашу вторую Google Таблицу
+# Ссылка на вашу вторую таблицу
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/115ZCC2QywKXR2ZQlfbvdqeVMpEIpZB9DO07RgR4U6V0/edit?usp=sharing"
 
 bot = Bot(token=BOT_TOKEN)
@@ -59,7 +60,6 @@ async def sync_courses_from_sheets():
     reader = csv.DictReader(io.StringIO(content))
     data = []
     for row in reader:
-        # Очищаем заголовки от возможных случайных пробелов
         clean_row = {k.strip().lower() if k else "": v for k, v in row.items()}
         c_id = clean_row.get("id")
         title = clean_row.get("title")
@@ -67,15 +67,14 @@ async def sync_courses_from_sheets():
         link = clean_row.get("link", "")
 
         if c_id and title and price:
-            # Извлекаем только цифры из стоимости на случай символов валют
             clean_price = re.sub(r"\D", "", str(price))
             clean_id = re.sub(r"\D", "", str(c_id))
             if clean_price and clean_id:
                 data.append((
                     int(clean_id),
-                    title.strip(),
+                    str(title).strip(),
                     int(clean_price),
-                    link.strip() if link else ""
+                    str(link).strip() if link else ""
                 ))
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -113,7 +112,6 @@ async def init_db():
                 val_text TEXT
             )
         """)
-        # По умолчанию скидка отключена (0)
         await db.execute("INSERT OR IGNORE INTO settings (key, val_text) VALUES ('promo_active', '0')")
         await db.execute("INSERT OR IGNORE INTO settings (key, val_text) VALUES ('promo_percent', '20')")
         await db.execute("INSERT OR IGNORE INTO settings (key, val_text) VALUES ('promo_min_sum', '1000')")
@@ -169,7 +167,7 @@ async def promo_control(message: types.Message):
                 f"<code>/promo on 20 1000</code> — включить 20% от 1000 руб.\n"
                 f"<code>/promo on 30 500 31.12.2026</code> — акция со сроком\n"
                 f"<code>/promo off</code> — выключить скидку",
-                parse_mode="HTML"
+                parse_mode=ParseMode.HTML
             )
             return
 
@@ -183,6 +181,13 @@ async def promo_control(message: types.Message):
             min_sum = int(parts[3]) if len(parts) > 3 else 1000
             until_date = parts[4] if len(parts) > 4 else ""
 
+            if until_date:
+                try:
+                    datetime.strptime(until_date, "%d.%m.%Y")
+                except ValueError:
+                    await message.answer("⚠️ Неверный формат даты! Указывайте как <code>01.12.2026</code>", parse_mode=ParseMode.HTML)
+                    return
+
             await db.execute("UPDATE settings SET val_text = '1' WHERE key = 'promo_active'")
             await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_percent'", (str(percent),))
             await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_min_sum'", (str(min_sum),))
@@ -193,7 +198,7 @@ async def promo_control(message: types.Message):
             await message.answer(f"🟢 Акция запущена: скидка {percent}% на заказы от {min_sum} руб.{until_msg}!")
 
 
-# Синхронизация каталога с таблицей (только для вас)
+# Принудительная синхронизация с таблицей
 @dp.message(Command("sync"))
 async def sync_cmd(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -202,7 +207,7 @@ async def sync_cmd(message: types.Message):
     await message.answer(f"✅ База обновлена из Google Таблицы: {count} курсов.")
 
 
-# Вызов полного перечня курсов (доступен клиенту)
+# Вывод каталога покупателю
 @dp.message(Command("catalog", "courses"))
 async def catalog_cmd(message: types.Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -213,17 +218,17 @@ async def catalog_cmd(message: types.Message):
         await message.answer("❌ Каталог курсов временно пуст или обновляется.")
         return
 
-    # Если курсов немного — шлем текстом прямо в чат
+    # До 25 позиций — сообщением в чат
     if len(courses) <= 25:
-        items = "\n".join([f"<code>{c[0]}</code> — {html.escape(c[1])} (<b>{c[2]} руб.</b>)" for c in courses])
+        items = "\n".join([f"<code>{c[0]}</code> — {html.escape(str(c[1]))} (<b>{c[2]} руб.</b>)" for c in courses])
         await message.answer(
             f"📚 <b>Список доступных курсов:</b>\n\n"
             f"{items}\n\n"
             f"💡 <i>Чтобы оформить заказ, отправьте боту номера курсов через запятую.</i>",
-            parse_mode="HTML"
+            parse_mode=ParseMode.HTML
         )
     else:
-        # Если курсов много — отправляем готовым файлом, чтобы не спамить в чат
+        # Более 25 позиций — аккуратным файлом без спама
         content = "КАТАЛОГ КУРСОВ\n" + "=" * 40 + "\n\n"
         content += "\n".join([f"№{c[0]} — {c[1]} — {c[2]} руб." for c in courses])
         content += "\n\n" + "=" * 40 + "\nДля заказа скопируйте нужные номера и отправьте их боту через запятую."
@@ -235,7 +240,7 @@ async def catalog_cmd(message: types.Message):
                 f"📚 <b>Полный перечень курсов ({len(courses)} шт.)</b>\n\n"
                 f"Файл прикреплен выше. Откройте его, выберите нужные номера и отправьте их в чат боту!"
             ),
-            parse_mode="HTML"
+            parse_mode=ParseMode.HTML
         )
 
 
@@ -246,7 +251,8 @@ async def start_cmd(message: types.Message, state: FSMContext):
 
     promo_text = ""
     if promo["active"]:
-        promo_text = f"\n\n🎁 <b>Праздничная акция:</b> действует скидка {promo['percent']}% на заказы от {promo['min_sum']} руб.!"
+        date_text = f" до {promo['until']}" if promo["until"] else ""
+        promo_text = f"\n\n🎁 <b>Праздничная акция:</b> действует скидка {promo['percent']}% на заказы от {promo['min_sum']} руб.{date_text}!"
 
     await message.answer(
         "👋 Здравствуйте!\n\n"
@@ -254,7 +260,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
         "Пример: <code>1, 4, 12</code>\n\n"
         "📖 Посмотреть весь перечень курсов: /catalog"
         f"{promo_text}",
-        parse_mode="HTML"
+        parse_mode=ParseMode.HTML
     )
 
 
@@ -262,7 +268,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
 async def process_articles(message: types.Message, state: FSMContext):
     raw_ids = re.findall(r"\b\d+\b", message.text)
     if not raw_ids:
-        await message.answer("Пожалуйста, отправьте номера курсов цифрами (например: <code>1, 2, 5</code>).", parse_mode="HTML")
+        await message.answer("Пожалуйста, отправьте номера курсов цифрами (например: <code>1, 2, 5</code>).", parse_mode=ParseMode.HTML)
         return
 
     unique_ids = list(dict.fromkeys([int(i) for i in raw_ids]))
@@ -302,7 +308,7 @@ async def process_articles(message: types.Message, state: FSMContext):
     await state.update_data(order_id=order_id)
     await state.set_state(OrderFSM.waiting_for_receipt)
 
-    summary = "\n".join([f"• №{c[0]} {html.escape(c[1])} — {c[2]} руб." for c in found_courses[:10]])
+    summary = "\n".join([f"• №{c[0]} {html.escape(str(c[1]))} — {c[2]} руб." for c in found_courses[:10]])
     if len(found_courses) > 10:
         summary += f"\n...и еще {len(found_courses) - 10} позиций"
 
@@ -313,32 +319,36 @@ async def process_articles(message: types.Message, state: FSMContext):
         f"{discount_info}\n\n"
         f"{PAYMENT_DETAILS}\n\n"
         f"📸 <b>Пришлите скриншот, фото чека или PDF-выписку в этот чат.</b>",
-        parse_mode="HTML"
+        parse_mode=ParseMode.HTML
     )
 
 
-# Обработка чеков (фото или PDF)
+# Прием чеков (фото или PDF) с защитой от перезагрузок сервера
 @dp.message(F.photo | F.document)
 async def process_receipt(message: types.Message, state: FSMContext):
     data = await state.get_data()
     order_id = data.get("order_id")
 
-    # Резервный поиск активного заказа, если Render перезагружался
     async with aiosqlite.connect(DB_PATH) as db:
         if not order_id:
             async with db.execute(
-                "SELECT id, total_price, course_ids FROM orders WHERE user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+                "SELECT id FROM orders WHERE user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
                 (message.from_user.id,)
             ) as cur:
                 last_order = await cur.fetchone()
                 if last_order:
                     order_id = last_order[0]
-                else:
-                    return
 
-        # Достаем названия курсов для информативного уведомления админа
+        if not order_id:
+            await message.answer("⚠️ Не найден активный заказ. Пожалуйста, отправьте номера курсов заново.")
+            return
+
         async with db.execute("SELECT course_ids, total_price FROM orders WHERE id = ?", (order_id,)) as cur:
             ord_data = await cur.fetchone()
+            if not ord_data:
+                await message.answer("Ошибка: заказ не найден.")
+                await state.clear()
+                return
             c_ids = [int(x) for x in ord_data[0].split(",")]
             order_price = ord_data[1]
 
@@ -352,7 +362,7 @@ async def process_receipt(message: types.Message, state: FSMContext):
     kb.adjust(2)
 
     user = f"@{message.from_user.username}" if message.from_user.username else f"ID: {message.from_user.id}"
-    courses_brief = "\n".join([f"• №{c[0]} {html.escape(c[1])}" for c in c_info[:7]])
+    courses_brief = "\n".join([f"• №{c[0]} {html.escape(str(c[1]))}" for c in c_info[:7]])
     if len(c_info) > 7:
         courses_brief += f"\n...и еще {len(c_info) - 7} шт."
 
@@ -364,25 +374,29 @@ async def process_receipt(message: types.Message, state: FSMContext):
         f"{courses_brief}"
     )
 
-    if message.photo:
-        await bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=message.photo[-1].file_id,
-            caption=caption_text,
-            reply_markup=kb.as_markup(),
-            parse_mode="HTML"
-        )
-    elif message.document:
-        await bot.send_document(
-            chat_id=ADMIN_ID,
-            document=message.document.file_id,
-            caption=caption_text,
-            reply_markup=kb.as_markup(),
-            parse_mode="HTML"
-        )
+    try:
+        if message.photo:
+            await bot.send_photo(
+                chat_id=ADMIN_ID,
+                photo=message.photo[-1].file_id,
+                caption=caption_text,
+                reply_markup=kb.as_markup(),
+                parse_mode=ParseMode.HTML
+            )
+        elif message.document:
+            await bot.send_document(
+                chat_id=ADMIN_ID,
+                document=message.document.file_id,
+                caption=caption_text,
+                reply_markup=kb.as_markup(),
+                parse_mode=ParseMode.HTML
+            )
 
-    await message.answer("✅ Чек отправлен на проверку. Ссылки придут сюда сразу после подтверждения.")
-    await state.clear()
+        await message.answer("✅ Чек отправлен на проверку. Ссылки придут сюда сразу после подтверждения.")
+        await state.clear()
+    except Exception as e:
+        logging.error(f"Ошибка отправки чека админу: {e}")
+        await message.answer("⚠️ Не удалось переслать чек. Пожалуйста, напишите администратору напрямую.")
 
 
 @dp.callback_query(F.data.startswith("adm_approve_"))
@@ -407,25 +421,32 @@ async def admin_approve(callback: types.CallbackQuery):
         await db.execute("UPDATE orders SET status = 'paid' WHERE id = ?", (order_id,))
         await db.commit()
 
-    if len(courses) > 10:
-        content = f"ВАШИ КУРСЫ (ЗАКАЗ #{order_id})\n" + "=" * 35 + "\n\n"
-        content += "\n\n".join([f"{c[0]}:\n{c[1]}" for c in courses])
-        doc = types.BufferedInputFile(content.encode("utf-8"), filename=f"Order_{order_id}.txt")
-        await bot.send_document(
-            chat_id=user_id,
-            document=doc,
-            caption="🎉 Оплата подтверждена! Ваши курсы собраны в файле выше."
-        )
-    else:
-        lines = [f"🎉 <b>Оплата подтверждена! Заказ #{order_id}:</b>\n"]
-        lines.extend([f"• <b>{html.escape(c[0])}</b>\n👉 {c[1]}" for c in courses])
-        await bot.send_message(chat_id=user_id, text="\n\n".join(lines), parse_mode="HTML")
+    try:
+        if len(courses) > 10:
+            content = f"ВАШИ КУРСЫ (ЗАКАЗ #{order_id})\n" + "=" * 35 + "\n\n"
+            content += "\n\n".join([f"{c[0]}:\n{c[1]}" for c in courses])
+            doc = types.BufferedInputFile(content.encode("utf-8"), filename=f"Order_{order_id}.txt")
+            await bot.send_document(
+                chat_id=user_id,
+                document=doc,
+                caption="🎉 Оплата подтверждена! Ваши курсы собраны в файле выше."
+            )
+        else:
+            lines = [f"🎉 <b>Оплата подтверждена! Заказ #{order_id}:</b>\n"]
+            lines.extend([f"• <b>{html.escape(str(c[0]))}</b>\n👉 {str(c[1]).strip()}" for c in courses])
+            await bot.send_message(chat_id=user_id, text="\n\n".join(lines), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logging.error(f"Ошибка выдачи ссылок клиенту {user_id}: {e}")
 
-    await callback.message.edit_caption(
-        caption=callback.message.caption + "\n\n🟢 <b>ОДОБРЕНО</b>",
-        reply_markup=None,
-        parse_mode="HTML"
-    )
+    base_caption = callback.message.caption or ""
+    try:
+        await callback.message.edit_caption(
+            caption=base_caption + "\n\n🟢 <b>ОДОБРЕНО</b>",
+            reply_markup=None,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
     await callback.answer("Доступ отправлен")
 
 
@@ -438,12 +459,19 @@ async def admin_reject(callback: types.CallbackQuery):
         async with db.execute("SELECT user_id FROM orders WHERE id = ?", (order_id,)) as cur:
             order = await cur.fetchone()
     if order:
-        await bot.send_message(chat_id=order[0], text=f"❌ Оплата по заказу #{order_id} отклонена.")
-    await callback.message.edit_caption(
-        caption=callback.message.caption + "\n\n🔴 <b>ОТКЛОНЕНО</b>",
-        reply_markup=None,
-        parse_mode="HTML"
-    )
+        try:
+            await bot.send_message(chat_id=order[0], text=f"❌ Оплата по заказу #{order_id} отклонена.")
+        except Exception:
+            pass
+    base_caption = callback.message.caption or ""
+    try:
+        await callback.message.edit_caption(
+            caption=base_caption + "\n\n🔴 <b>ОТКЛОНЕНО</b>",
+            reply_markup=None,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
     await callback.answer("Отклонено")
 
 
