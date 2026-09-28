@@ -20,7 +20,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "688074424"))
 
-# Конфигурация двух ваших ботов
+# Конфигурация двух ботов
 BOT_CONFIGS = [
     {
         "name": "Основной канал",
@@ -50,7 +50,6 @@ BOT_CONFIGS = [
     }
 ]
 
-# Список системных кнопок для исключения из обработки артикулов
 MENU_BUTTONS = {
     "📚 Каталог курсов", "🎁 Акции и скидки", "ℹ️ Как сделать заказ",
     "📢 Сделать рассылку", "👥 Список клиентов", "🔄 Обновить курсы",
@@ -63,6 +62,11 @@ class OrderFSM(StatesGroup):
 class BroadcastFSM(StatesGroup):
     waiting_for_message = State()
 
+class PromoFSM(StatesGroup):
+    waiting_for_percent = State()
+    waiting_for_min_sum = State()
+    waiting_for_until = State()
+
 def get_export_url(share_url: str) -> str:
     match = re.search(r"/d/([a-zA-Z0-9-_]+)", share_url)
     if not match:
@@ -70,7 +74,6 @@ def get_export_url(share_url: str) -> str:
     sheet_id = match.group(1)
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
-# Меню для покупателей
 def get_client_kb():
     builder = ReplyKeyboardBuilder()
     builder.button(text="📚 Каталог курсов")
@@ -79,7 +82,6 @@ def get_client_kb():
     builder.adjust(2, 1)
     return builder.as_markup(resize_keyboard=True)
 
-# Меню для администратора
 def get_admin_kb():
     builder = ReplyKeyboardBuilder()
     builder.button(text="📚 Каталог курсов")
@@ -188,7 +190,6 @@ def create_bot_app(cfg: dict):
                     full_name TEXT
                 )
             """)
-            # Добавляем колонки при обновлении старой базы
             try:
                 await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
             except Exception:
@@ -242,7 +243,7 @@ def create_bot_app(cfg: dict):
             "until": until_str
         }
 
-    # 1. СТАРТ И МЕНЮ
+    # 1. СТАРТ
     @dp.message(CommandStart())
     async def start_cmd(message: types.Message, state: FSMContext):
         await state.clear()
@@ -268,7 +269,233 @@ def create_bot_app(cfg: dict):
             reply_markup=kb
         )
 
-    # 2. ПРОСМОТР СПИСКА ПОЛЬЗОВАТЕЛЕЙ (ТОЛЬКО ДЛЯ ВАС)
+    # 2. МЕНЮ СКИДОК
+    @dp.message(Command("promo"))
+    @dp.message(F.text.in_({"🏷 Скидки и акции", "🎁 Акции и скидки"}))
+    async def promo_control(message: types.Message, state: FSMContext):
+        await state.clear()
+        is_admin = (message.from_user.id == ADMIN_ID)
+        cfg = await get_promo_config()
+
+        if not is_admin:
+            if cfg["active"]:
+                d_msg = f" до {cfg['until']}" if cfg['until'] else ""
+                await message.answer(
+                    f"🎁 <b>Действующая акция:</b>\n\n"
+                    f"Скидка <b>{cfg['percent']}%</b> на заказы от <b>{cfg['min_sum']} руб.</b>{d_msg}!\n\n"
+                    f"Скидка применяется автоматически при заказе.",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await message.answer("ℹ️ В данный момент спец-акций нет, действуют базовые цены из каталога.")
+            return
+
+        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА"
+        date_info = f"\nДействует до: {cfg['until']}" if cfg['until'] else "\nДействует: бессрочно"
+
+        kb = InlineKeyboardBuilder()
+        if cfg["active"]:
+            kb.button(text="🔴 Выключить скидку", callback_data="promo_toggle_off")
+        else:
+            kb.button(text=f"🟢 Включить ({cfg['percent']}% от {cfg['min_sum']}₽)", callback_data="promo_toggle_on")
+        kb.button(text="✏️ Настроить параметры", callback_data="promo_wizard_start")
+        kb.adjust(1)
+
+        await message.answer(
+            f"📊 <b>[{bot_name}] Управление скидками:</b>\n\n"
+            f"Статус: <b>{status}</b>\n"
+            f"Размер: <b>{cfg['percent']}%</b>\n"
+            f"Порог: от <b>{cfg['min_sum']} руб.</b>{date_info}\n\n"
+            f"<i>Нажмите «Настроить параметры», чтобы задать процент, сумму или дату без команд.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+
+    # 3. ПОШАГОВЫЙ МАСТЕР НАСТРОЙКИ СКИДКИ (БЕЗ КОМАНД)
+    @dp.callback_query(F.data == "promo_wizard_start")
+    async def promo_wizard_start_cb(callback: types.CallbackQuery, state: FSMContext):
+        if callback.from_user.id != ADMIN_ID:
+            return
+        await state.set_state(PromoFSM.waiting_for_percent)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data="promo_cancel")
+        await callback.message.answer(
+            "✏️ <b>Шаг 1 из 3:</b>\n\n"
+            "Отправьте сообщением <b>размер скидки в %</b> (только цифры, например: <code>25</code>):",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+        await callback.answer()
+
+    @dp.message(PromoFSM.waiting_for_percent, F.text)
+    async def promo_step_percent(message: types.Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            return
+        if message.text in ["❌ Отмена", "/cancel", "Отмена"]:
+            await state.clear()
+            await message.answer("❌ Настройка отменена.", reply_markup=get_admin_kb())
+            return
+
+        text = message.text.strip().replace("%", "")
+        if not text.isdigit() or not (1 <= int(text) <= 99):
+            await message.answer("⚠️ Пожалуйста, введите процент числом от 1 до 99 (например: <code>20</code> или <code>30</code>):", parse_mode=ParseMode.HTML)
+            return
+
+        await state.update_data(new_percent=int(text))
+        await state.set_state(PromoFSM.waiting_for_min_sum)
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data="promo_cancel")
+        await message.answer(
+            "✏️ <b>Шаг 2 из 3:</b>\n\n"
+            "Отправьте <b>минимальную сумму заказа</b> в рублях (например: <code>1000</code> или <code>500</code>):",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+
+    @dp.message(PromoFSM.waiting_for_min_sum, F.text)
+    async def promo_step_min_sum(message: types.Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            return
+        if message.text in ["❌ Отмена", "/cancel", "Отмена"]:
+            await state.clear()
+            await message.answer("❌ Настройка отменена.", reply_markup=get_admin_kb())
+            return
+
+        text = message.text.strip().replace("руб", "").replace("р", "").strip()
+        if not text.isdigit() or int(text) < 0:
+            await message.answer("⚠️ Введите сумму числом без букв (например: <code>1000</code>):", parse_mode=ParseMode.HTML)
+            return
+
+        await state.update_data(new_min_sum=int(text))
+        await state.set_state(PromoFSM.waiting_for_until)
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Бессрочно (без даты)", callback_data="promo_set_no_date")
+        kb.button(text="❌ Отмена", callback_data="promo_cancel")
+        kb.adjust(1)
+
+        await message.answer(
+            "✏️ <b>Шаг 3 из 3:</b>\n\n"
+            "Отправьте <b>дату окончания</b> в формате ДД.ММ.ГГГГ (например: <code>31.12.2026</code>).\n\n"
+            "<i>Либо нажмите кнопку «Бессрочно (без даты)» ниже:</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+
+    @dp.message(PromoFSM.waiting_for_until, F.text)
+    async def promo_step_until(message: types.Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            return
+        if message.text in ["❌ Отмена", "/cancel", "Отмена"]:
+            await state.clear()
+            await message.answer("❌ Настройка отменена.", reply_markup=get_admin_kb())
+            return
+
+        val = message.text.strip()
+        if val in ["0", "-", "нет", "бессрочно"]:
+            until_date = ""
+        else:
+            try:
+                datetime.strptime(val, "%d.%m.%Y")
+                until_date = val
+            except ValueError:
+                await message.answer("⚠️ Неверный формат даты. Введите например <code>31.12.2026</code> или отправьте <code>0</code> (бессрочно):", parse_mode=ParseMode.HTML)
+                return
+
+        data = await state.get_data()
+        percent = data.get("new_percent", 20)
+        min_sum = data.get("new_min_sum", 1000)
+        await state.clear()
+
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("UPDATE settings SET val_text = '1' WHERE key = 'promo_active'")
+            await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_percent'", (str(percent),))
+            await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_min_sum'", (str(min_sum),))
+            await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_until'", (until_date,))
+            await db.commit()
+
+        d_msg = f" до {until_date}" if until_date else " (бессрочно)"
+        await message.answer(
+            f"🎉 <b>[{bot_name}] Настройки применены и скидка ВКЛЮЧЕНА!</b>\n\n"
+            f"🔥 Размер: <b>{percent}%</b>\n"
+            f"💰 Порог: от <b>{min_sum} руб.</b>\n"
+            f"📅 Срок:{d_msg}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_admin_kb()
+        )
+
+    @dp.callback_query(F.data == "promo_set_no_date")
+    async def promo_set_no_date_cb(callback: types.CallbackQuery, state: FSMContext):
+        if callback.from_user.id != ADMIN_ID:
+            return
+        data = await state.get_data()
+        percent = data.get("new_percent", 20)
+        min_sum = data.get("new_min_sum", 1000)
+        await state.clear()
+
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("UPDATE settings SET val_text = '1' WHERE key = 'promo_active'")
+            await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_percent'", (str(percent),))
+            await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_min_sum'", (str(min_sum),))
+            await db.execute("UPDATE settings SET val_text = '' WHERE key = 'promo_until'")
+            await db.commit()
+
+        await callback.message.edit_text(
+            f"🎉 <b>[{bot_name}] Настройки применены и скидка ВКЛЮЧЕНА!</b>\n\n"
+            f"🔥 Размер: <b>{percent}%</b>\n"
+            f"💰 Порог: от <b>{min_sum} руб.</b>\n"
+            f"📅 Срок: бессрочно",
+            parse_mode=ParseMode.HTML
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith("promo_toggle_"))
+    async def promo_toggle_cb(callback: types.CallbackQuery):
+        if callback.from_user.id != ADMIN_ID:
+            return
+        act = callback.data.split("_")[2]
+        async with aiosqlite.connect(db_path) as db:
+            if act == "off":
+                await db.execute("UPDATE settings SET val_text = '0' WHERE key = 'promo_active'")
+                await db.commit()
+                await callback.answer("Скидка выключена")
+            else:
+                await db.execute("UPDATE settings SET val_text = '1' WHERE key = 'promo_active'")
+                await db.commit()
+                await callback.answer("Скидка включена")
+
+        cfg = await get_promo_config()
+        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА"
+        date_info = f"\nДействует до: {cfg['until']}" if cfg['until'] else "\nДействует: бессрочно"
+
+        kb = InlineKeyboardBuilder()
+        if cfg["active"]:
+            kb.button(text="🔴 Выключить скидку", callback_data="promo_toggle_off")
+        else:
+            kb.button(text=f"🟢 Включить ({cfg['percent']}% от {cfg['min_sum']}₽)", callback_data="promo_toggle_on")
+        kb.button(text="✏️ Настроить параметры", callback_data="promo_wizard_start")
+        kb.adjust(1)
+
+        await callback.message.edit_text(
+            f"📊 <b>[{bot_name}] Управление скидками:</b>\n\n"
+            f"Статус: <b>{status}</b>\n"
+            f"Размер: <b>{cfg['percent']}%</b>\n"
+            f"Порог: от <b>{cfg['min_sum']} руб.</b>{date_info}\n\n"
+            f"<i>Нажмите «Настроить параметры», чтобы задать процент, сумму или дату без команд.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+
+    @dp.callback_query(F.data == "promo_cancel")
+    async def promo_cancel_cb(callback: types.CallbackQuery, state: FSMContext):
+        if callback.from_user.id != ADMIN_ID:
+            return
+        await state.clear()
+        await callback.message.edit_text("❌ Настройка скидки отменена.")
+        await callback.answer()
+
+    # 4. СПИСОК КЛИЕНТОВ
     @dp.message(F.text.in_({"👥 Список клиентов", "/users"}))
     async def users_list_cmd(message: types.Message):
         if message.from_user.id != ADMIN_ID:
@@ -282,7 +509,6 @@ def create_bot_app(cfg: dict):
             await message.answer(f"ℹ️ [{bot_name}] В базе пока нет пользователей.")
             return
 
-        # Проверяем, кто из них совершал оплату
         async with aiosqlite.connect(db_path) as db:
             async with db.execute("SELECT DISTINCT user_id FROM orders WHERE status = 'paid'") as cur:
                 buyers = {row[0] for row in await cur.fetchall()}
@@ -319,7 +545,7 @@ def create_bot_app(cfg: dict):
                 parse_mode=ParseMode.HTML
             )
 
-    # 3. КАТАЛОГ КУРСОВ
+    # 5. КАТАЛОГ КУРСОВ
     @dp.message(F.text.in_({"📚 Каталог курсов", "/catalog", "/courses"}))
     async def catalog_cmd(message: types.Message):
         await record_user(message.from_user)
@@ -350,7 +576,7 @@ def create_bot_app(cfg: dict):
                 parse_mode=ParseMode.HTML
             )
 
-    # 4. ИНСТРУКЦИЯ
+    # 6. ИНСТРУКЦИЯ
     @dp.message(F.text.in_({"ℹ️ Как сделать заказ", "/help"}))
     async def help_cmd(message: types.Message):
         await record_user(message.from_user)
@@ -364,82 +590,7 @@ def create_bot_app(cfg: dict):
             parse_mode=ParseMode.HTML
         )
 
-    # 5. УПРАВЛЕНИЕ СКИДКАМИ
-    @dp.message(F.text.in_({"🏷 Скидки и акции", "🎁 Акции и скидки", "/promo"}))
-    async def promo_control(message: types.Message):
-        cfg = await get_promo_config()
-        is_admin = (message.from_user.id == ADMIN_ID)
-
-        if not is_admin:
-            if cfg["active"]:
-                d_msg = f" до {cfg['until']}" if cfg['until'] else ""
-                await message.answer(
-                    f"🎁 <b>Действующая акция:</b>\n\n"
-                    f"Скидка <b>{cfg['percent']}%</b> на все заказы от <b>{cfg['min_sum']} руб.</b>{d_msg}!\n\n"
-                    f"Скидка применяется автоматически при заказе.",
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                await message.answer("ℹ️ В данный момент спец-акций нет, действуют базовые цены из каталога.")
-            return
-
-        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА"
-        date_info = f"\nДействует до: {cfg['until']}" if cfg["until"] else ""
-
-        kb = InlineKeyboardBuilder()
-        if cfg["active"]:
-            kb.button(text="🔴 Выключить скидку", callback_data="promo_toggle_off")
-        else:
-            kb.button(text="🟢 Включить 20% от 1000₽", callback_data="promo_toggle_on")
-        kb.adjust(1)
-
-        await message.answer(
-            f"📊 <b>[{bot_name}] Управление скидками:</b>\n\n"
-            f"Статус: <b>{status}</b>\n"
-            f"Размер: <b>{cfg['percent']}%</b>\n"
-            f"Порог: от <b>{cfg['min_sum']} руб.</b>{date_info}\n\n"
-            f"<i>Переключайте скидку кнопкой ниже в 1 клик:</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb.as_markup()
-        )
-
-    @dp.callback_query(F.data.startswith("promo_toggle_"))
-    async def promo_toggle_cb(callback: types.CallbackQuery):
-        if callback.from_user.id != ADMIN_ID:
-            return
-        act = callback.data.split("_")[2]
-        async with aiosqlite.connect(db_path) as db:
-            if act == "off":
-                await db.execute("UPDATE settings SET val_text = '0' WHERE key = 'promo_active'")
-                await db.commit()
-                await callback.answer("Скидка выключена")
-            else:
-                await db.execute("UPDATE settings SET val_text = '1' WHERE key = 'promo_active'")
-                await db.execute("UPDATE settings SET val_text = '20' WHERE key = 'promo_percent'")
-                await db.execute("UPDATE settings SET val_text = '1000' WHERE key = 'promo_min_sum'")
-                await db.commit()
-                await callback.answer("Скидка 20% включена")
-
-        cfg = await get_promo_config()
-        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА"
-        kb = InlineKeyboardBuilder()
-        if cfg["active"]:
-            kb.button(text="🔴 Выключить скидку", callback_data="promo_toggle_off")
-        else:
-            kb.button(text="🟢 Включить 20% от 1000₽", callback_data="promo_toggle_on")
-        kb.adjust(1)
-
-        await callback.message.edit_text(
-            f"📊 <b>[{bot_name}] Управление скидками:</b>\n\n"
-            f"Статус: <b>{status}</b>\n"
-            f"Размер: <b>{cfg['percent']}%</b>\n"
-            f"Порог: от <b>{cfg['min_sum']} руб.</b>\n\n"
-            f"<i>Переключайте скидку кнопкой ниже в 1 клик:</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb.as_markup()
-        )
-
-    # 6. СИНХРОНИЗАЦИЯ ТАБЛИЦЫ
+    # 7. СИНХРОНИЗАЦИЯ ТАБЛИЦЫ
     @dp.message(F.text.in_({"🔄 Обновить курсы", "/sync"}))
     async def sync_cmd(message: types.Message):
         if message.from_user.id != ADMIN_ID:
@@ -447,7 +598,7 @@ def create_bot_app(cfg: dict):
         count = await sync_courses_from_sheets()
         await message.answer(f"✅ [{bot_name}] База обновлена из Google Таблицы: <b>{count} курсов</b>.", parse_mode=ParseMode.HTML)
 
-    # 7. СТАТИСТИКА БАЗЫ
+    # 8. СТАТИСТИКА БАЗЫ
     @dp.message(F.text == "📊 Статистика базы")
     async def stats_cmd(message: types.Message):
         if message.from_user.id != ADMIN_ID:
@@ -473,7 +624,7 @@ def create_bot_app(cfg: dict):
             parse_mode=ParseMode.HTML
         )
 
-    # 8. РАССЫЛКА
+    # 9. РАССЫЛКА
     @dp.message(F.text.in_({"📢 Сделать рассылку", "/broadcast"}))
     async def broadcast_start(message: types.Message, state: FSMContext):
         if message.from_user.id != ADMIN_ID:
@@ -581,8 +732,8 @@ def create_bot_app(cfg: dict):
         await callback.message.edit_text("❌ Рассылка отменена.")
         await callback.answer()
 
-    # 9. ОБРАБОТКА ВВОДА НОМЕРОВ КУРСОВ
-    @dp.message(~StateFilter(BroadcastFSM.waiting_for_message), F.text, ~F.text.startswith("/"))
+    # 10. ОБРАБОТКА ВВОДА НОМЕРОВ КУРСОВ (ИСКЛЮЧАЕТ СОСТОЯНИЯ НАСТРОЙКИ СКИДКИ)
+    @dp.message(StateFilter(None, OrderFSM.waiting_for_receipt), F.text, ~F.text.startswith("/"))
     async def process_articles(message: types.Message, state: FSMContext):
         if message.text in MENU_BUTTONS:
             return
@@ -644,8 +795,8 @@ def create_bot_app(cfg: dict):
             parse_mode=ParseMode.HTML
         )
 
-    # 10. ПРИЕМ ЧЕКОВ
-    @dp.message(~StateFilter(BroadcastFSM.waiting_for_message), F.photo | F.document)
+    # 11. ПРИЕМ ЧЕКОВ (ФОТО И PDF)
+    @dp.message(~StateFilter(BroadcastFSM.waiting_for_message, PromoFSM.waiting_for_percent, PromoFSM.waiting_for_min_sum, PromoFSM.waiting_for_until), F.photo | F.document)
     async def process_receipt(message: types.Message, state: FSMContext):
         data = await state.get_data()
         order_id = data.get("order_id")
@@ -715,7 +866,7 @@ def create_bot_app(cfg: dict):
         except Exception as e:
             logging.error(f"[{bot_name}] Ошибка пересылки чека: {e}")
 
-    # 11. ОДОБРЕНИЕ И ОТКЛОНЕНИЕ ЧЕКОВ
+    # 12. ОДОБРЕНИЕ И ОТКЛОНЕНИЕ ЧЕКОВ
     @dp.callback_query(F.data.startswith("adm_appr_"))
     async def admin_approve(callback: types.CallbackQuery):
         if callback.from_user.id != ADMIN_ID:
