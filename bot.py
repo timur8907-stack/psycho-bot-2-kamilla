@@ -10,15 +10,17 @@ import aiohttp
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import BotCommand
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "688074424"))
 
-# Конфигурация двух ботов
+# Конфигурация двух ваших ботов
 BOT_CONFIGS = [
     {
         "name": "Основной канал",
@@ -48,10 +50,18 @@ BOT_CONFIGS = [
     }
 ]
 
+# Список системных кнопок для исключения из обработки артикулов
+MENU_BUTTONS = {
+    "📚 Каталог курсов", "🎁 Акции и скидки", "ℹ️ Как сделать заказ",
+    "📢 Сделать рассылку", "👥 Список клиентов", "🔄 Обновить курсы",
+    "🏷 Скидки и акции", "📊 Статистика базы", "❌ Отмена"
+}
 
 class OrderFSM(StatesGroup):
     waiting_for_receipt = State()
 
+class BroadcastFSM(StatesGroup):
+    waiting_for_message = State()
 
 def get_export_url(share_url: str) -> str:
     match = re.search(r"/d/([a-zA-Z0-9-_]+)", share_url)
@@ -60,6 +70,27 @@ def get_export_url(share_url: str) -> str:
     sheet_id = match.group(1)
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
+# Меню для покупателей
+def get_client_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📚 Каталог курсов")
+    builder.button(text="🎁 Акции и скидки")
+    builder.button(text="ℹ️ Как сделать заказ")
+    builder.adjust(2, 1)
+    return builder.as_markup(resize_keyboard=True)
+
+# Меню для администратора
+def get_admin_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📚 Каталог курсов")
+    builder.button(text="📢 Сделать рассылку")
+    builder.button(text="👥 Список клиентов")
+    builder.button(text="🔄 Обновить курсы")
+    builder.button(text="🏷 Скидки и акции")
+    builder.button(text="📊 Статистика базы")
+    builder.button(text="ℹ️ Как сделать заказ")
+    builder.adjust(2, 2, 2, 1)
+    return builder.as_markup(resize_keyboard=True)
 
 def create_bot_app(cfg: dict):
     token = cfg["token"]
@@ -70,6 +101,19 @@ def create_bot_app(cfg: dict):
 
     bot = Bot(token=token)
     dp = Dispatcher(storage=MemoryStorage())
+
+    async def record_user(u: types.User):
+        username = f"@{u.username}" if u.username else ""
+        full_name = u.full_name or ""
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("""
+                INSERT INTO users (user_id, username, full_name)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    full_name = excluded.full_name
+            """, (u.id, username, full_name))
+            await db.commit()
 
     async def sync_courses_from_sheets():
         url = get_export_url(sheet_url)
@@ -109,7 +153,7 @@ def create_bot_app(cfg: dict):
                 await db.commit()
             return len(data)
         except Exception as e:
-            logging.error(f"[{bot_name}] Ошибка синхронизации таблицы: {e}")
+            logging.error(f"[{bot_name}] Ошибка синхронизации: {e}")
             return 0
 
     async def init_db():
@@ -137,11 +181,39 @@ def create_bot_app(cfg: dict):
                     val_text TEXT
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT
+                )
+            """)
+            # Добавляем колонки при обновлении старой базы
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
+            except Exception:
+                pass
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+            except Exception:
+                pass
+
+            await db.execute("INSERT OR IGNORE INTO users (user_id) SELECT DISTINCT user_id FROM orders")
             await db.execute("INSERT OR IGNORE INTO settings (key, val_text) VALUES ('promo_active', '0')")
             await db.execute("INSERT OR IGNORE INTO settings (key, val_text) VALUES ('promo_percent', '20')")
             await db.execute("INSERT OR IGNORE INTO settings (key, val_text) VALUES ('promo_min_sum', '1000')")
             await db.execute("INSERT OR IGNORE INTO settings (key, val_text) VALUES ('promo_until', '')")
             await db.commit()
+
+        try:
+            await bot.set_my_commands([
+                BotCommand(command="start", description="Главное меню"),
+                BotCommand(command="catalog", description="Каталог курсов"),
+                BotCommand(command="help", description="Как сделать заказ"),
+            ])
+        except Exception:
+            pass
+
         await sync_courses_from_sheets()
 
     async def get_promo_config():
@@ -170,64 +242,87 @@ def create_bot_app(cfg: dict):
             "until": until_str
         }
 
-    @dp.message(Command("promo"))
-    async def promo_control(message: types.Message):
+    # 1. СТАРТ И МЕНЮ
+    @dp.message(CommandStart())
+    async def start_cmd(message: types.Message, state: FSMContext):
+        await state.clear()
+        await record_user(message.from_user)
+        promo = await get_promo_config()
+
+        promo_text = ""
+        if promo["active"]:
+            date_text = f" до {promo['until']}" if promo["until"] else ""
+            promo_text = f"\n\n🎁 <b>Праздничная акция:</b> скидка {promo['percent']}% на заказы от {promo['min_sum']} руб.{date_text}!"
+
+        is_admin = (message.from_user.id == ADMIN_ID)
+        kb = get_admin_kb() if is_admin else get_client_kb()
+        admin_note = "\n\n<i>👑 Вы вошли как администратор. Панель управления закреплена на кнопках внизу.</i>" if is_admin else ""
+
+        await message.answer(
+            "👋 Здравствуйте!\n\n"
+            "Для заказа отправьте <b>номера (артикулы) курсов</b> через запятую или пробел.\n\n"
+            "Пример: <code>1, 4, 12</code>\n\n"
+            "Воспользуйтесь кнопками меню внизу для выбора действий."
+            f"{promo_text}{admin_note}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb
+        )
+
+    # 2. ПРОСМОТР СПИСКА ПОЛЬЗОВАТЕЛЕЙ (ТОЛЬКО ДЛЯ ВАС)
+    @dp.message(F.text.in_({"👥 Список клиентов", "/users"}))
+    async def users_list_cmd(message: types.Message):
         if message.from_user.id != ADMIN_ID:
             return
 
-        parts = message.text.split()
         async with aiosqlite.connect(db_path) as db:
-            if len(parts) == 1:
-                p_cfg = await get_promo_config()
-                status = "🟢 ВКЛЮЧЕНА" if p_cfg["active"] else "🔴 ВЫКЛЮЧЕНА"
-                date_info = f"\nДействует до: {p_cfg['until']}" if p_cfg["until"] else ""
-                await message.answer(
-                    f"📊 <b>[{bot_name}] Статус скидки:</b> {status}\n"
-                    f"Размер: {p_cfg['percent']}%\n"
-                    f"Порог: от {p_cfg['min_sum']} руб.{date_info}\n\n"
-                    f"<b>Команды:</b>\n"
-                    f"<code>/promo on 20 1000</code>\n"
-                    f"<code>/promo on 30 500 31.12.2026</code>\n"
-                    f"<code>/promo off</code>",
-                    parse_mode=ParseMode.HTML
-                )
-                return
+            async with db.execute("SELECT user_id, username, full_name FROM users ORDER BY user_id DESC") as cur:
+                users = await cur.fetchall()
 
-            action = parts[1].lower()
-            if action == "off":
-                await db.execute("UPDATE settings SET val_text = '0' WHERE key = 'promo_active'")
-                await db.commit()
-                await message.answer(f"🔴 [{bot_name}] Скидка отключена.")
-            elif action == "on":
-                percent = int(parts[2]) if len(parts) > 2 else 20
-                min_sum = int(parts[3]) if len(parts) > 3 else 1000
-                until_date = parts[4] if len(parts) > 4 else ""
-
-                if until_date:
-                    try:
-                        datetime.strptime(until_date, "%d.%m.%Y")
-                    except ValueError:
-                        await message.answer("⚠️ Формат даты: <code>01.12.2026</code>", parse_mode=ParseMode.HTML)
-                        return
-
-                await db.execute("UPDATE settings SET val_text = '1' WHERE key = 'promo_active'")
-                await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_percent'", (str(percent),))
-                await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_min_sum'", (str(min_sum),))
-                await db.execute("UPDATE settings SET val_text = ? WHERE key = 'promo_until'", (until_date,))
-                await db.commit()
-
-                until_msg = f" до {until_date}" if until_date else ""
-                await message.answer(f"🟢 [{bot_name}] Скидка {percent}% на заказы от {min_sum} руб.{until_msg} включена!")
-
-    @dp.message(Command("sync"))
-    async def sync_cmd(message: types.Message):
-        if message.from_user.id != ADMIN_ID:
+        if not users:
+            await message.answer(f"ℹ️ [{bot_name}] В базе пока нет пользователей.")
             return
-        count = await sync_courses_from_sheets()
-        await message.answer(f"✅ [{bot_name}] База синхронизирована: {count} курсов.")
 
-    @dp.message(Command("catalog", "courses"))
+        # Проверяем, кто из них совершал оплату
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute("SELECT DISTINCT user_id FROM orders WHERE status = 'paid'") as cur:
+                buyers = {row[0] for row in await cur.fetchall()}
+
+        lines = []
+        for i, (u_id, u_name, f_name) in enumerate(users, start=1):
+            name_str = html.escape(f_name) if f_name else "Имя не указано"
+            user_nick = f" ({html.escape(u_name)})" if u_name else ""
+            buyer_badge = " 💰" if u_id in buyers else ""
+            lines.append(f"{i}. <b>{name_str}</b>{user_nick}{buyer_badge} — <code>{u_id}</code>")
+
+        if len(lines) <= 30:
+            text = (
+                f"👥 <b>[{bot_name}] Пользователи базы ({len(users)} чел.):</b>\n"
+                f"<i>(Значком 💰 отмечены покупатели)</i>\n\n" +
+                "\n".join(lines)
+            )
+            await message.answer(text, parse_mode=ParseMode.HTML)
+        else:
+            file_lines = []
+            for i, (u_id, u_name, f_name) in enumerate(users, start=1):
+                name_str = f_name if f_name else "Имя не указано"
+                user_nick = f" ({u_name})" if u_name else ""
+                buyer_badge = " [Покупатель]" if u_id in buyers else ""
+                file_lines.append(f"{i}. {name_str}{user_nick}{buyer_badge} — ID: {u_id}")
+
+            content = f"СПИСОК ПОЛЬЗОВАТЕЛЕЙ ({bot_name})\n" + "=" * 40 + "\n\n"
+            content += "\n".join(file_lines)
+
+            doc = types.BufferedInputFile(content.encode("utf-8"), filename="users_list.txt")
+            await message.answer_document(
+                document=doc,
+                caption=f"👥 <b>[{bot_name}] Полный список пользователей ({len(users)} чел.)</b>\n\nФайл прикреплен выше.",
+                parse_mode=ParseMode.HTML
+            )
+
+    # 3. КАТАЛОГ КУРСОВ
+    @dp.message(F.text.in_({"📚 Каталог курсов", "/catalog", "/courses"}))
     async def catalog_cmd(message: types.Message):
+        await record_user(message.from_user)
         async with aiosqlite.connect(db_path) as db:
             async with db.execute("SELECT id, title, price FROM courses ORDER BY id ASC") as cur:
                 courses = await cur.fetchall()
@@ -255,26 +350,244 @@ def create_bot_app(cfg: dict):
                 parse_mode=ParseMode.HTML
             )
 
-    @dp.message(CommandStart())
-    async def start_cmd(message: types.Message, state: FSMContext):
-        await state.clear()
-        promo = await get_promo_config()
-        promo_text = ""
-        if promo["active"]:
-            date_text = f" до {promo['until']}" if promo["until"] else ""
-            promo_text = f"\n\n🎁 <b>Праздничная акция:</b> скидка {promo['percent']}% на заказы от {promo['min_sum']} руб.{date_text}!"
-
+    # 4. ИНСТРУКЦИЯ
+    @dp.message(F.text.in_({"ℹ️ Как сделать заказ", "/help"}))
+    async def help_cmd(message: types.Message):
+        await record_user(message.from_user)
         await message.answer(
-            "👋 Здравствуйте!\n\n"
-            "Для заказа отправьте <b>номера (артикулы) курсов</b> через запятую или пробел.\n\n"
-            "Пример: <code>1, 4, 12</code>\n\n"
-            "📖 Посмотреть весь перечень: /catalog"
-            f"{promo_text}",
+            "🛒 <b>Как сделать заказ:</b>\n\n"
+            "1️⃣ Нажмите <b>«📚 Каталог курсов»</b> или выберите номер в канале.\n"
+            "2️⃣ Отправьте в этот чат номера курсов через запятую (например: <code>1, 4, 12</code>).\n"
+            "3️⃣ Бот рассчитает сумму со скидкой и выдаст реквизиты.\n"
+            "4️⃣ Оплатите и отправьте фото/скриншот чека прямо сюда.\n"
+            "5️⃣ Ссылки поступят моментально после проверки чека!",
             parse_mode=ParseMode.HTML
         )
 
-    @dp.message(F.text, ~F.text.startswith("/"))
+    # 5. УПРАВЛЕНИЕ СКИДКАМИ
+    @dp.message(F.text.in_({"🏷 Скидки и акции", "🎁 Акции и скидки", "/promo"}))
+    async def promo_control(message: types.Message):
+        cfg = await get_promo_config()
+        is_admin = (message.from_user.id == ADMIN_ID)
+
+        if not is_admin:
+            if cfg["active"]:
+                d_msg = f" до {cfg['until']}" if cfg['until'] else ""
+                await message.answer(
+                    f"🎁 <b>Действующая акция:</b>\n\n"
+                    f"Скидка <b>{cfg['percent']}%</b> на все заказы от <b>{cfg['min_sum']} руб.</b>{d_msg}!\n\n"
+                    f"Скидка применяется автоматически при заказе.",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await message.answer("ℹ️ В данный момент спец-акций нет, действуют базовые цены из каталога.")
+            return
+
+        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА"
+        date_info = f"\nДействует до: {cfg['until']}" if cfg["until"] else ""
+
+        kb = InlineKeyboardBuilder()
+        if cfg["active"]:
+            kb.button(text="🔴 Выключить скидку", callback_data="promo_toggle_off")
+        else:
+            kb.button(text="🟢 Включить 20% от 1000₽", callback_data="promo_toggle_on")
+        kb.adjust(1)
+
+        await message.answer(
+            f"📊 <b>[{bot_name}] Управление скидками:</b>\n\n"
+            f"Статус: <b>{status}</b>\n"
+            f"Размер: <b>{cfg['percent']}%</b>\n"
+            f"Порог: от <b>{cfg['min_sum']} руб.</b>{date_info}\n\n"
+            f"<i>Переключайте скидку кнопкой ниже в 1 клик:</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+
+    @dp.callback_query(F.data.startswith("promo_toggle_"))
+    async def promo_toggle_cb(callback: types.CallbackQuery):
+        if callback.from_user.id != ADMIN_ID:
+            return
+        act = callback.data.split("_")[2]
+        async with aiosqlite.connect(db_path) as db:
+            if act == "off":
+                await db.execute("UPDATE settings SET val_text = '0' WHERE key = 'promo_active'")
+                await db.commit()
+                await callback.answer("Скидка выключена")
+            else:
+                await db.execute("UPDATE settings SET val_text = '1' WHERE key = 'promo_active'")
+                await db.execute("UPDATE settings SET val_text = '20' WHERE key = 'promo_percent'")
+                await db.execute("UPDATE settings SET val_text = '1000' WHERE key = 'promo_min_sum'")
+                await db.commit()
+                await callback.answer("Скидка 20% включена")
+
+        cfg = await get_promo_config()
+        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА"
+        kb = InlineKeyboardBuilder()
+        if cfg["active"]:
+            kb.button(text="🔴 Выключить скидку", callback_data="promo_toggle_off")
+        else:
+            kb.button(text="🟢 Включить 20% от 1000₽", callback_data="promo_toggle_on")
+        kb.adjust(1)
+
+        await callback.message.edit_text(
+            f"📊 <b>[{bot_name}] Управление скидками:</b>\n\n"
+            f"Статус: <b>{status}</b>\n"
+            f"Размер: <b>{cfg['percent']}%</b>\n"
+            f"Порог: от <b>{cfg['min_sum']} руб.</b>\n\n"
+            f"<i>Переключайте скидку кнопкой ниже в 1 клик:</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+
+    # 6. СИНХРОНИЗАЦИЯ ТАБЛИЦЫ
+    @dp.message(F.text.in_({"🔄 Обновить курсы", "/sync"}))
+    async def sync_cmd(message: types.Message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        count = await sync_courses_from_sheets()
+        await message.answer(f"✅ [{bot_name}] База обновлена из Google Таблицы: <b>{count} курсов</b>.", parse_mode=ParseMode.HTML)
+
+    # 7. СТАТИСТИКА БАЗЫ
+    @dp.message(F.text == "📊 Статистика базы")
+    async def stats_cmd(message: types.Message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute("SELECT COUNT(*) FROM users") as cur:
+                users_count = (await cur.fetchone())[0]
+            async with db.execute("SELECT COUNT(*) FROM courses") as cur:
+                courses_count = (await cur.fetchone())[0]
+            async with db.execute("SELECT COUNT(*), COALESCE(SUM(total_price), 0) FROM orders WHERE status = 'paid'") as cur:
+                p_row = await cur.fetchone()
+                paid_orders, paid_sum = p_row[0], p_row[1]
+            async with db.execute("SELECT COUNT(*) FROM orders WHERE status = 'pending'") as cur:
+                pending_orders = (await cur.fetchone())[0]
+
+        await message.answer(
+            f"📊 <b>Статистика [{bot_name}]:</b>\n\n"
+            f"👥 Пользователей в базе: <b>{users_count}</b>\n"
+            f"📚 Курсов в наличии: <b>{courses_count}</b>\n\n"
+            f"💰 Оплаченных заказов: <b>{paid_orders}</b> (на <b>{paid_sum} руб.</b>)\n"
+            f"⏳ Заказов ожидает проверки: <b>{pending_orders}</b>\n\n"
+            f"👉 <i>Чтобы посмотреть список людей по именам, нажмите кнопку <b>«👥 Список клиентов»</b></i>",
+            parse_mode=ParseMode.HTML
+        )
+
+    # 8. РАССЫЛКА
+    @dp.message(F.text.in_({"📢 Сделать рассылку", "/broadcast"}))
+    async def broadcast_start(message: types.Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            return
+        await state.set_state(BroadcastFSM.waiting_for_message)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data="cancel_broadcast")
+        await message.answer(
+            "📢 <b>Режим создания рассылки</b>\n\n"
+            "Пришлите боту сообщение для рассылки:\n"
+            "• Текст со ссылкой на новую группу\n"
+            "• Фото или картинку с описанием\n"
+            "• Готовый пересланный пост из канала\n\n"
+            "<i>Если передумали — нажмите кнопку «Отмена» ниже.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+
+    @dp.message(BroadcastFSM.waiting_for_message)
+    async def broadcast_incoming(message: types.Message, state: FSMContext):
+        if message.from_user.id != ADMIN_ID:
+            return
+        if message.text in ["/cancel", "❌ Отмена", "Отмена"]:
+            await state.clear()
+            await message.answer("❌ Рассылка отменена.", reply_markup=get_admin_kb())
+            return
+
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute("SELECT COUNT(*) FROM users") as cur:
+                count = (await cur.fetchone())[0]
+
+        await state.update_data(broadcast_msg_id=message.message_id, broadcast_chat_id=message.chat.id)
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text=f"🚀 Отправить ({count} чел.)", callback_data="confirm_broadcast")
+        kb.button(text="❌ Отмена", callback_data="cancel_broadcast")
+        kb.adjust(1, 1)
+
+        await message.reply(
+            f"📋 <b>Сообщение принято!</b>\n\n"
+            f"👥 Адресатов в базе: <b>{count}</b>\n\n"
+            f"Нажмите кнопку для подтверждения отправки:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+
+    @dp.callback_query(F.data == "confirm_broadcast")
+    async def broadcast_confirm(callback: types.CallbackQuery, state: FSMContext):
+        if callback.from_user.id != ADMIN_ID:
+            return
+        data = await state.get_data()
+        b_mid = data.get("broadcast_msg_id")
+        b_cid = data.get("broadcast_chat_id")
+        await state.clear()
+
+        if not b_mid or not b_cid:
+            await callback.message.edit_text("⚠️ Ошибка: сообщение не найдено.")
+            return
+
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute("SELECT user_id FROM users") as cur:
+                users = await cur.fetchall()
+
+        if not users:
+            await callback.message.edit_text("ℹ️ База пользователей пуста.")
+            return
+
+        status_msg = await callback.message.edit_text(f"⏳ Рассылка запущена на {len(users)} пользователей...")
+        success, blocked, errors = 0, 0, 0
+
+        for row in users:
+            u_id = row[0]
+            try:
+                await bot.copy_message(chat_id=u_id, from_chat_id=b_cid, message_id=b_mid)
+                success += 1
+            except TelegramForbiddenError:
+                blocked += 1
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after)
+                try:
+                    await bot.copy_message(chat_id=u_id, from_chat_id=b_cid, message_id=b_mid)
+                    success += 1
+                except Exception:
+                    errors += 1
+            except Exception:
+                errors += 1
+
+            await asyncio.sleep(0.04)
+
+        await status_msg.edit_text(
+            f"📢 <b>Рассылка завершена!</b>\n\n"
+            f"👥 Всего адресатов: <b>{len(users)}</b>\n"
+            f"✅ Успешно доставлено: <b>{success}</b>\n"
+            f"🚫 Заблокировали бота: <b>{blocked}</b>\n"
+            f"⚠️ Ошибок: <b>{errors}</b>",
+            parse_mode=ParseMode.HTML
+        )
+        await callback.answer("Готово!")
+
+    @dp.callback_query(F.data == "cancel_broadcast")
+    async def broadcast_cancel(callback: types.CallbackQuery, state: FSMContext):
+        if callback.from_user.id != ADMIN_ID:
+            return
+        await state.clear()
+        await callback.message.edit_text("❌ Рассылка отменена.")
+        await callback.answer()
+
+    # 9. ОБРАБОТКА ВВОДА НОМЕРОВ КУРСОВ
+    @dp.message(~StateFilter(BroadcastFSM.waiting_for_message), F.text, ~F.text.startswith("/"))
     async def process_articles(message: types.Message, state: FSMContext):
+        if message.text in MENU_BUTTONS:
+            return
+        await record_user(message.from_user)
+
         raw_ids = re.findall(r"\b\d+\b", message.text)
         if not raw_ids:
             await message.answer("Пожалуйста, укажите номера курсов цифрами (например: <code>1, 2, 5</code>).", parse_mode=ParseMode.HTML)
@@ -331,7 +644,8 @@ def create_bot_app(cfg: dict):
             parse_mode=ParseMode.HTML
         )
 
-    @dp.message(F.photo | F.document)
+    # 10. ПРИЕМ ЧЕКОВ
+    @dp.message(~StateFilter(BroadcastFSM.waiting_for_message), F.photo | F.document)
     async def process_receipt(message: types.Message, state: FSMContext):
         data = await state.get_data()
         order_id = data.get("order_id")
@@ -401,6 +715,7 @@ def create_bot_app(cfg: dict):
         except Exception as e:
             logging.error(f"[{bot_name}] Ошибка пересылки чека: {e}")
 
+    # 11. ОДОБРЕНИЕ И ОТКЛОНЕНИЕ ЧЕКОВ
     @dp.callback_query(F.data.startswith("adm_appr_"))
     async def admin_approve(callback: types.CallbackQuery):
         if callback.from_user.id != ADMIN_ID:
@@ -477,7 +792,6 @@ def create_bot_app(cfg: dict):
 
     return bot, dp, init_db
 
-
 async def main():
     logging.basicConfig(level=logging.INFO)
     tasks = []
@@ -488,7 +802,6 @@ async def main():
 
     logging.info("Оба бота успешно инициализированы и запущены!")
     await asyncio.gather(*tasks)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
