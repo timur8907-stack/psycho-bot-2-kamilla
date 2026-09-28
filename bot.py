@@ -18,9 +18,8 @@ from aiogram.types import BotCommand
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "688074424"))[span_0](start_span)[span_0](end_span)
+ADMIN_ID = int(os.getenv("ADMIN_ID", "688074424"))
 
-# Конфигурация двух ботов
 BOT_CONFIGS = [
     {
         "name": "Основной канал",
@@ -46,7 +45,6 @@ BOT_CONFIGS = [
     }
 ]
 
-# Кнопки меню для исключения из обработки артикулов
 MENU_BUTTONS = {
     "📚 Каталог курсов", "🎁 Акции и скидки", "ℹ️ Как сделать заказ",
     "📢 Сделать рассылку", "👥 Список клиентов", "💳 Реквизиты",
@@ -64,11 +62,11 @@ class PaymentFSM(StatesGroup):
     waiting_for_details = State()
 
 def get_export_url(share_url: str) -> str:
-    match = re.search(r"/d/([a-zA-Z0-9-_]+)", share_url)[span_1](start_span)[span_1](end_span)
+    match = re.search(r"/d/([a-zA-Z0-9-_]+)", share_url)
     if not match:
         return share_url
-    sheet_id = match.group(1)[span_2](start_span)[span_2](end_span)
-    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv[span_3](start_span)"[span_3](end_span)
+    sheet_id = match.group(1)
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
 def get_client_kb():
     builder = ReplyKeyboardBuilder()
@@ -98,11 +96,11 @@ def create_bot_app(cfg: dict):
     default_payments = cfg["default_payments"]
     bot_name = cfg["name"]
 
-    bot = Bot(token=token)[span_4](start_span)[span_4](end_span)
-    dp = Dispatcher(storage=MemoryStorage())[span_5](start_span)[span_5](end_span)
+    bot = Bot(token=token)
+    dp = Dispatcher(storage=MemoryStorage())
 
     async def record_user(u: types.User):
-        username = f"@{u.username}" if u.username else "[span_6](start_span)"[span_6](end_span)
+        username = f"@{u.username}" if u.username else ""
         full_name = u.full_name or ""
         async with aiosqlite.connect(db_path) as db:
             await db.execute("""
@@ -115,15 +113,15 @@ def create_bot_app(cfg: dict):
             await db.commit()
 
     async def sync_courses_from_sheets():
-        url = get_export_url(sheet_url)[span_7](start_span)[span_7](end_span)
+        url = get_export_url(sheet_url)
         try:
-            async with aiohttp.ClientSession() as session:[span_8](start_span)[span_8](end_span)
-                async with session.get(url) as resp:[span_9](start_span)[span_9](end_span)
-                    if resp.status != 200:[span_10](start_span)[span_10](end_span)
-                        return 0[span_11](start_span)[span_11](end_span)
-                    content = await resp.text()[span_12](start_span)[span_12](end_span)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        return 0
+                    content = await resp.text()
 
-            reader = csv.DictReader(io.StringIO(content))[span_13](start_span)[span_13](end_span)
+            reader = csv.DictReader(io.StringIO(content))
             data = []
             for row in reader:
                 clean_row = {k.strip().lower() if k else "": v for k, v in row.items()}
@@ -143,20 +141,20 @@ def create_bot_app(cfg: dict):
                             str(link).strip() if link else ""
                         ))
 
-            async with aiosqlite.connect(db_path) as db:[span_14](start_span)[span_14](end_span)
-                await db.execute("DELETE FROM courses")[span_15](start_span)[span_15](end_span)
-                await db.executemany([span_16](start_span)[span_16](end_span)
-                    "INSERT INTO courses (id, title, price, link) VALUES (?, ?, ?, ?)",[span_17](start_span)[span_17](end_span)
-                    data[span_18](start_span)[span_18](end_span)
+            async with aiosqlite.connect(db_path) as db:
+                await db.execute("DELETE FROM courses")
+                await db.executemany(
+                    "INSERT INTO courses (id, title, price, link) VALUES (?, ?, ?, ?)",
+                    data
                 )
-                await db.commit()[span_19](start_span)[span_19](end_span)
-            return len(data)[span_20](start_span)[span_20](end_span)
+                await db.commit()
+            return len(data)
         except Exception as e:
             logging.error(f"[{bot_name}] Ошибка синхронизации: {e}")
             return 0
 
     async def init_db():
-        async with aiosqlite.connect(db_path) as db:[span_21](start_span)[span_21](end_span)
+        async with aiosqlite.connect(db_path) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS courses (
                     id INTEGER PRIMARY KEY,
@@ -164,7 +162,7 @@ def create_bot_app(cfg: dict):
                     price INTEGER,
                     link TEXT
                 )
-            """)[span_22](start_span)[span_22](end_span)
+            """)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS orders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,7 +171,7 @@ def create_bot_app(cfg: dict):
                     total_price INTEGER,
                     status TEXT DEFAULT 'pending'
                 )
-            """)[span_23](start_span)[span_23](end_span)
+            """)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
@@ -195,7 +193,6 @@ def create_bot_app(cfg: dict):
                 )
             """)
 
-            # Добавляем колонки при обновлении существующей базы
             try:
                 await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
             except Exception:
@@ -211,7 +208,6 @@ def create_bot_app(cfg: dict):
             await db.execute("INSERT OR IGNORE INTO settings (key, val_text) VALUES ('promo_min_sum', '1000')")
             await db.execute("INSERT OR IGNORE INTO settings (key, val_text) VALUES ('promo_until', '')")
 
-            # Начальное наполнение реквизитов по умолчанию при первом запуске
             async with db.execute("SELECT COUNT(*) FROM payment_methods") as cur:
                 pm_count = (await cur.fetchone())[0]
             if pm_count == 0:
@@ -220,7 +216,7 @@ def create_bot_app(cfg: dict):
                     default_payments
                 )
 
-            await db.commit()[span_24](start_span)[span_24](end_span)
+            await db.commit()
 
         try:
             await bot.set_my_commands([
@@ -231,7 +227,7 @@ def create_bot_app(cfg: dict):
         except Exception:
             pass
 
-        await sync_courses_from_sheets()[span_25](start_span)[span_25](end_span)
+        await sync_courses_from_sheets()
 
     async def get_payment_details_text() -> str:
         async with aiosqlite.connect(db_path) as db:
@@ -292,10 +288,9 @@ def create_bot_app(cfg: dict):
             "until": until_str
         }
 
-    # 1. СТАРТ И МЕНЮ
     @dp.message(CommandStart())
     async def start_cmd(message: types.Message, state: FSMContext):
-        await state.clear()[span_26](start_span)[span_26](end_span)
+        await state.clear()
         await record_user(message.from_user)
         promo = await get_promo_config()
 
@@ -304,7 +299,7 @@ def create_bot_app(cfg: dict):
             date_text = f" до {promo['until']}" if promo["until"] else ""
             promo_text = f"\n\n🎁 <b>Праздничная акция:</b> скидка {promo['percent']}% на заказы от {promo['min_sum']} руб.{date_text}!"
 
-        is_admin = (message.from_user.id == ADMIN_ID)[span_27](start_span)[span_27](end_span)
+        is_admin = (message.from_user.id == ADMIN_ID)
         kb = get_admin_kb() if is_admin else get_client_kb()
         admin_note = "\n\n<i>👑 Вы вошли как администратор. Панель управления закреплена на кнопках внизу.</i>" if is_admin else ""
 
@@ -318,17 +313,16 @@ def create_bot_app(cfg: dict):
             reply_markup=kb
         )
 
-    # 2. РЕКВИЗИТЫ ОПЛАТЫ (МЕНЮ АДМИНИСТРАТОРА)
     @dp.message(F.text.in_({"💳 Реквизиты", "/payments"}))
     async def payment_settings_cmd(message: types.Message):
-        if message.from_user.id != ADMIN_ID:[span_28](start_span)[span_28](end_span)
+        if message.from_user.id != ADMIN_ID:
             return
         text, kb = await render_payment_methods_ui()
         await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
     @dp.callback_query(F.data.startswith("del_pm_"))
     async def del_payment_cb(callback: types.CallbackQuery):
-        if callback.from_user.id != ADMIN_ID:[span_29](start_span)[span_29](end_span)
+        if callback.from_user.id != ADMIN_ID:
             return
         pm_id = int(callback.data.split("_")[2])
         async with aiosqlite.connect(db_path) as db:
@@ -342,8 +336,8 @@ def create_bot_app(cfg: dict):
             pass
 
     @dp.callback_query(F.data == "add_pm")
-    async def add_payment_cb(callback: types.CallbackQuery, state: FSMContext):
-        if callback.from_user.id != ADMIN_ID:[span_30](start_span)[span_30](end_span)
+    async def add_pm_cb(callback: types.CallbackQuery, state: FSMContext):
+        if callback.from_user.id != ADMIN_ID:
             return
         await state.set_state(PaymentFSM.waiting_for_title)
         kb = InlineKeyboardBuilder()
@@ -358,10 +352,10 @@ def create_bot_app(cfg: dict):
 
     @dp.message(PaymentFSM.waiting_for_title)
     async def add_payment_title(message: types.Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:[span_31](start_span)[span_31](end_span)
+        if message.from_user.id != ADMIN_ID:
             return
         if message.text in ["/cancel", "❌ Отмена", "Отмена"]:
-            await state.clear()[span_32](start_span)[span_32](end_span)
+            await state.clear()
             await message.answer("❌ Добавление реквизита отменено.", reply_markup=get_admin_kb())
             return
         title = message.text.strip()
@@ -379,16 +373,16 @@ def create_bot_app(cfg: dict):
 
     @dp.message(PaymentFSM.waiting_for_details)
     async def add_payment_details(message: types.Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:[span_33](start_span)[span_33](end_span)
+        if message.from_user.id != ADMIN_ID:
             return
         if message.text in ["/cancel", "❌ Отмена", "Отмена"]:
-            await state.clear()[span_34](start_span)[span_34](end_span)
+            await state.clear()
             await message.answer("❌ Добавление реквизита отменено.", reply_markup=get_admin_kb())
             return
         details = message.text.strip()
-        data = await state.get_data()[span_35](start_span)[span_35](end_span)
+        data = await state.get_data()
         title = data.get("new_pm_title", "Реквизиты")
-        await state.clear()[span_36](start_span)[span_36](end_span)
+        await state.clear()
 
         async with aiosqlite.connect(db_path) as db:
             await db.execute(
@@ -408,16 +402,15 @@ def create_bot_app(cfg: dict):
 
     @dp.callback_query(F.data == "cancel_pm")
     async def cancel_pm_cb(callback: types.CallbackQuery, state: FSMContext):
-        if callback.from_user.id != ADMIN_ID:[span_37](start_span)[span_37](end_span)
+        if callback.from_user.id != ADMIN_ID:
             return
-        await state.clear()[span_38](start_span)[span_38](end_span)
+        await state.clear()
         await callback.message.edit_text("❌ Добавление реквизита отменено.")
         await callback.answer()
 
-    # 3. ПРОСМОТР СПИСКА КЛИЕНТОВ (ТОЛЬКО АДМИНУ)
     @dp.message(F.text.in_({"👥 Список клиентов", "/users"}))
     async def users_list_cmd(message: types.Message):
-        if message.from_user.id != ADMIN_ID:[span_39](start_span)[span_39](end_span)
+        if message.from_user.id != ADMIN_ID:
             return
 
         async with aiosqlite.connect(db_path) as db:
@@ -464,11 +457,10 @@ def create_bot_app(cfg: dict):
                 parse_mode=ParseMode.HTML
             )
 
-    # 4. КАТАЛОГ КУРСОВ
     @dp.message(F.text.in_({"📚 Каталог курсов", "/catalog", "/courses"}))
     async def catalog_cmd(message: types.Message):
         await record_user(message.from_user)
-        async with aiosqlite.connect(db_path) as db:[span_40](start_span)[span_40](end_span)
+        async with aiosqlite.connect(db_path) as db:
             async with db.execute("SELECT id, title, price FROM courses ORDER BY id ASC") as cur:
                 courses = await cur.fetchall()
 
@@ -495,7 +487,6 @@ def create_bot_app(cfg: dict):
                 parse_mode=ParseMode.HTML
             )
 
-    # 5. ИНСТРУКЦИЯ
     @dp.message(F.text.in_({"ℹ️ Как сделать заказ", "/help"}))
     async def help_cmd(message: types.Message):
         await record_user(message.from_user)
@@ -509,11 +500,10 @@ def create_bot_app(cfg: dict):
             parse_mode=ParseMode.HTML
         )
 
-    # 6. УПРАВЛЕНИЕ СКИДКАМИ
-    @dp.message(F.text.in_({"🏷 Скидки и акции", "🎁 Акции и скидки", "/promo"}))[span_41](start_span)[span_41](end_span)
+    @dp.message(F.text.in_({"🏷 Скидки и акции", "🎁 Акции и скидки", "/promo"}))
     async def promo_control(message: types.Message):
         cfg = await get_promo_config()
-        is_admin = (message.from_user.id == ADMIN_ID)[span_42](start_span)[span_42](end_span)
+        is_admin = (message.from_user.id == ADMIN_ID)
 
         if not is_admin:
             if cfg["active"]:
@@ -528,7 +518,7 @@ def create_bot_app(cfg: dict):
                 await message.answer("ℹ️ В данный момент спец-акций нет, действуют базовые цены из каталога.")
             return
 
-        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА[span_43](start_span)"[span_43](end_span)
+        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА"
         date_info = f"\nДействует до: {cfg['until']}" if cfg["until"] else ""
 
         kb = InlineKeyboardBuilder()
@@ -550,7 +540,7 @@ def create_bot_app(cfg: dict):
 
     @dp.callback_query(F.data.startswith("promo_toggle_"))
     async def promo_toggle_cb(callback: types.CallbackQuery):
-        if callback.from_user.id != ADMIN_ID:[span_44](start_span)[span_44](end_span)
+        if callback.from_user.id != ADMIN_ID:
             return
         act = callback.data.split("_")[2]
         async with aiosqlite.connect(db_path) as db:
@@ -566,7 +556,7 @@ def create_bot_app(cfg: dict):
                 await callback.answer("Скидка 20% включена")
 
         cfg = await get_promo_config()
-        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА[span_45](start_span)"[span_45](end_span)
+        status = "🟢 ВКЛЮЧЕНА" if cfg["active"] else "🔴 ВЫКЛЮЧЕНА"
         kb = InlineKeyboardBuilder()
         if cfg["active"]:
             kb.button(text="🔴 Выключить скидку", callback_data="promo_toggle_off")
@@ -584,18 +574,16 @@ def create_bot_app(cfg: dict):
             reply_markup=kb.as_markup()
         )
 
-    # 7. СИНХРОНИЗАЦИЯ ТАБЛИЦЫ
     @dp.message(F.text.in_({"🔄 Обновить курсы", "/sync"}))
     async def sync_cmd(message: types.Message):
-        if message.from_user.id != ADMIN_ID:[span_46](start_span)[span_46](end_span)
+        if message.from_user.id != ADMIN_ID:
             return
-        count = await sync_courses_from_sheets()[span_47](start_span)[span_47](end_span)
-        await message.answer(f"✅ [{bot_name}] База обновлена из Google Таблицы: <b>{count} курсов</b>.", parse_mode=ParseMode.HTML)[span_48](start_span)[span_48](end_span)
+        count = await sync_courses_from_sheets()
+        await message.answer(f"✅ [{bot_name}] База обновлена из Google Таблицы: <b>{count} курсов</b>.", parse_mode=ParseMode.HTML)
 
-    # 8. СТАТИСТИКА БАЗЫ
     @dp.message(F.text == "📊 Статистика базы")
     async def stats_cmd(message: types.Message):
-        if message.from_user.id != ADMIN_ID:[span_49](start_span)[span_49](end_span)
+        if message.from_user.id != ADMIN_ID:
             return
         async with aiosqlite.connect(db_path) as db:
             async with db.execute("SELECT COUNT(*) FROM users") as cur:
@@ -618,10 +606,9 @@ def create_bot_app(cfg: dict):
             parse_mode=ParseMode.HTML
         )
 
-    # 9. РАССЫЛКА
     @dp.message(F.text.in_({"📢 Сделать рассылку", "/broadcast"}))
     async def broadcast_start(message: types.Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:[span_50](start_span)[span_50](end_span)
+        if message.from_user.id != ADMIN_ID:
             return
         await state.set_state(BroadcastFSM.waiting_for_message)
         kb = InlineKeyboardBuilder()
@@ -639,10 +626,10 @@ def create_bot_app(cfg: dict):
 
     @dp.message(BroadcastFSM.waiting_for_message)
     async def broadcast_incoming(message: types.Message, state: FSMContext):
-        if message.from_user.id != ADMIN_ID:[span_51](start_span)[span_51](end_span)
+        if message.from_user.id != ADMIN_ID:
             return
         if message.text in ["/cancel", "❌ Отмена", "Отмена"]:
-            await state.clear()[span_52](start_span)[span_52](end_span)
+            await state.clear()
             await message.answer("❌ Рассылка отменена.", reply_markup=get_admin_kb())
             return
 
@@ -667,12 +654,12 @@ def create_bot_app(cfg: dict):
 
     @dp.callback_query(F.data == "confirm_broadcast")
     async def broadcast_confirm(callback: types.CallbackQuery, state: FSMContext):
-        if callback.from_user.id != ADMIN_ID:[span_53](start_span)[span_53](end_span)
+        if callback.from_user.id != ADMIN_ID:
             return
-        data = await state.get_data()[span_54](start_span)[span_54](end_span)
+        data = await state.get_data()
         b_mid = data.get("broadcast_msg_id")
         b_cid = data.get("broadcast_chat_id")
-        await state.clear()[span_55](start_span)[span_55](end_span)
+        await state.clear()
 
         if not b_mid or not b_cid:
             await callback.message.edit_text("⚠️ Ошибка: сообщение не найдено.")
@@ -718,7 +705,6 @@ def create_bot_app(cfg: dict):
         )
         await callback.answer("Готово!")
 
-    # 10. ОБРАБОТКА ВВОДА НОМЕРОВ КУРСОВ ПОКУПАТЕЛЕМ
     @dp.message(
         ~StateFilter(BroadcastFSM.waiting_for_message, PaymentFSM.waiting_for_title, PaymentFSM.waiting_for_details),
         F.text,
@@ -729,74 +715,73 @@ def create_bot_app(cfg: dict):
             return
         await record_user(message.from_user)
 
-        raw_ids = re.findall(r"\b\d+\b", message.text)[span_56](start_span)[span_56](end_span)
+        raw_ids = re.findall(r"\b\d+\b", message.text)
         if not raw_ids:
-            await message.answer("Пожалуйста, укажите номера курсов цифрами (например: <code>1, 2, 5</code>).", parse_mode=ParseMode.HTML)[span_57](start_span)[span_57](end_span)
+            await message.answer("Пожалуйста, укажите номера курсов цифрами (например: <code>1, 2, 5</code>).", parse_mode=ParseMode.HTML)
             return
 
-        unique_ids = list(dict.fromkeys([int(i) for i in raw_ids]))[span_58](start_span)[span_58](end_span)
-        placeholders = ",".join("?" for _ in unique_ids)[span_59](start_span)[span_59](end_span)
+        unique_ids = list(dict.fromkeys([int(i) for i in raw_ids]))
+        placeholders = ",".join("?" for _ in unique_ids)
 
-        async with aiosqlite.connect(db_path) as db:[span_60](start_span)[span_60](end_span)
-            async with db.execute(f"SELECT id, title, price FROM courses WHERE id IN ({placeholders})", unique_ids) as cur:[span_61](start_span)[span_61](end_span)
-                found_courses = await cur.fetchall()[span_62](start_span)[span_62](end_span)
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute(f"SELECT id, title, price FROM courses WHERE id IN ({placeholders})", unique_ids) as cur:
+                found_courses = await cur.fetchall()
 
         if not found_courses:
-            await message.answer("❌ Ни один курс по указанным номерам не найден.")[span_63](start_span)[span_63](end_span)
+            await message.answer("❌ Ни один курс по указанным номерам не найден.")
             return
 
         promo = await get_promo_config()
-        raw_total = sum(c[2] for c in found_courses)[span_64](start_span)[span_64](end_span)
+        raw_total = sum(c[2] for c in found_courses)
         final_total = raw_total
-        discount_info = f"💰 <b>Итого к оплате:</b> {final_total} руб.[span_65](start_span)"[span_65](end_span)
+        discount_info = f"💰 <b>Итого к оплате:</b> {final_total} руб."
 
         if promo["active"] and raw_total >= promo["min_sum"]:
-            discount = int(raw_total * (promo["percent"] / 100))[span_66](start_span)[span_66](end_span)
-            final_total = raw_total - discount[span_67](start_span)[span_67](end_span)
+            discount = int(raw_total * (promo["percent"] / 100))
+            final_total = raw_total - discount
             discount_info = (
-                f"🏷 Сумма: {raw_total} руб.\n[span_68](start_span)"[span_68](end_span)
+                f"🏷 Сумма: {raw_total} руб.\n"
                 f"🔥 Скидка {promo['percent']}%: -{discount} руб.\n"
-                f"💰 <b>Итого к оплате:</b> {final_total} руб.[span_69](start_span)"[span_69](end_span)
+                f"💰 <b>Итого к оплате:</b> {final_total} руб."
             )
 
-        saved_ids = ",".join(str(c[0]) for c in found_courses)[span_70](start_span)[span_70](end_span)
-        async with aiosqlite.connect(db_path) as db:[span_71](start_span)[span_71](end_span)
-            cursor = await db.execute([span_72](start_span)[span_72](end_span)
-                "INSERT INTO orders (user_id, course_ids, total_price) VALUES (?, ?, ?)",[span_73](start_span)[span_73](end_span)
-                (message.from_user.id, saved_ids, final_total)[span_74](start_span)[span_74](end_span)
+        saved_ids = ",".join(str(c[0]) for c in found_courses)
+        async with aiosqlite.connect(db_path) as db:
+            cursor = await db.execute(
+                "INSERT INTO orders (user_id, course_ids, total_price) VALUES (?, ?, ?)",
+                (message.from_user.id, saved_ids, final_total)
             )
-            order_id = cursor.lastrowid[span_75](start_span)[span_75](end_span)
-            await db.commit()[span_76](start_span)[span_76](end_span)
+            order_id = cursor.lastrowid
+            await db.commit()
 
-        await state.update_data(order_id=order_id)[span_77](start_span)[span_77](end_span)
-        await state.set_state(OrderFSM.waiting_for_receipt)[span_78](start_span)[span_78](end_span)
+        await state.update_data(order_id=order_id)
+        await state.set_state(OrderFSM.waiting_for_receipt)
 
         summary = "\n".join([f"• №{c[0]} {html.escape(str(c[1]))} — {c[2]} руб." for c in found_courses[:10]])
         if len(found_courses) > 10:
-            summary += f"\n...и еще {len(found_courses) - 10} позиций[span_79](start_span)"[span_79](end_span)
+            summary += f"\n...и еще {len(found_courses) - 10} позиций"
 
         payment_details_text = await get_payment_details_text()
 
         await message.answer(
-            f"🧾 <b>Заказ #{order_id} сформирован</b>\n\n[span_80](start_span)"[span_80](end_span)
+            f"🧾 <b>Заказ #{order_id} сформирован</b>\n\n"
             f"{summary}\n\n"
-            f"Выбрано: <b>{len(found_courses)} шт.</b>\n[span_81](start_span)"[span_81](end_span)
+            f"Выбрано: <b>{len(found_courses)} шт.</b>\n"
             f"{discount_info}\n\n"
             f"{payment_details_text}\n\n"
             f"📸 <b>Пришлите скриншот чека или PDF в этот чат.</b>",
             parse_mode=ParseMode.HTML
         )
 
-    # 11. ПРИЕМ ЧЕКОВ
     @dp.message(
         ~StateFilter(BroadcastFSM.waiting_for_message, PaymentFSM.waiting_for_title, PaymentFSM.waiting_for_details),
-        F.photo | F.document[span_82](start_span)[span_82](end_span)
+        F.photo | F.document
     )
     async def process_receipt(message: types.Message, state: FSMContext):
-        data = await state.get_data()[span_83](start_span)[span_83](end_span)
-        order_id = data.get("order_id")[span_84](start_span)[span_84](end_span)
+        data = await state.get_data()
+        order_id = data.get("order_id")
 
-        async with aiosqlite.connect(db_path) as db:[span_85](start_span)[span_85](end_span)
+        async with aiosqlite.connect(db_path) as db:
             if not order_id:
                 async with db.execute(
                     "SELECT id FROM orders WHERE user_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
@@ -810,26 +795,26 @@ def create_bot_app(cfg: dict):
                 await message.answer("⚠️ Не найден активный заказ. Отправьте номера курсов заново.")
                 return
 
-            async with db.execute("SELECT course_ids, total_price FROM orders WHERE id = ?", (order_id,)) as cur:[span_86](start_span)[span_86](end_span)
-                ord_data = await cur.fetchone()[span_87](start_span)[span_87](end_span)
+            async with db.execute("SELECT course_ids, total_price FROM orders WHERE id = ?", (order_id,)) as cur:
+                ord_data = await cur.fetchone()
                 if not ord_data:
                     return
-                c_ids = [int(x) for x in ord_data[0].split(",")][span_88](start_span)[span_88](end_span)
+                c_ids = [int(x) for x in ord_data[0].split(",")]
                 order_price = ord_data[1]
 
-            placeholders = ",".join("?" for _ in c_ids)[span_89](start_span)[span_89](end_span)
-            async with db.execute(f"SELECT id, title FROM courses WHERE id IN ({placeholders})", c_ids) as cur:[span_90](start_span)[span_90](end_span)
-                c_info = await cur.fetchall()[span_91](start_span)[span_91](end_span)
+            placeholders = ",".join("?" for _ in c_ids)
+            async with db.execute(f"SELECT id, title FROM courses WHERE id IN ({placeholders})", c_ids) as cur:
+                c_info = await cur.fetchall()
 
-        kb = InlineKeyboardBuilder()[span_92](start_span)[span_92](end_span)
+        kb = InlineKeyboardBuilder()
         kb.button(text="✅ Подтвердить", callback_data=f"adm_appr_{order_id}")
         kb.button(text="❌ Отклонить", callback_data=f"adm_rejc_{order_id}")
-        kb.adjust(2)[span_93](start_span)[span_93](end_span)
+        kb.adjust(2)
 
-        user = f"@{message.from_user.username}" if message.from_user.username else f"ID: {message.from_user.id}[span_94](start_span)"[span_94](end_span)
+        user = f"@{message.from_user.username}" if message.from_user.username else f"ID: {message.from_user.id}"
         courses_brief = "\n".join([f"• №{c[0]} {html.escape(str(c[1]))}" for c in c_info[:7]])
         if len(c_info) > 7:
-            courses_brief += f"\n...и еще {len(c_info) - 7} шт.[span_95](start_span)"[span_95](end_span)
+            courses_brief += f"\n...и еще {len(c_info) - 7} шт."
 
         caption_text = (
             f"🧾 <b>[{bot_name}] Оплата заказа #{order_id}</b>\n"
@@ -840,59 +825,58 @@ def create_bot_app(cfg: dict):
         )
 
         try:
-            if message.photo:[span_96](start_span)[span_96](end_span)
-                await bot.send_photo([span_97](start_span)[span_97](end_span)
-                    chat_id=ADMIN_ID,[span_98](start_span)[span_98](end_span)
-                    photo=message.photo[-1].file_id,[span_99](start_span)[span_99](end_span)
+            if message.photo:
+                await bot.send_photo(
+                    chat_id=ADMIN_ID,
+                    photo=message.photo[-1].file_id,
                     caption=caption_text,
-                    reply_markup=kb.as_markup(),[span_100](start_span)[span_100](end_span)
+                    reply_markup=kb.as_markup(),
                     parse_mode=ParseMode.HTML
                 )
-            elif message.document:[span_101](start_span)[span_101](end_span)
-                await bot.send_document([span_102](start_span)[span_102](end_span)
-                    chat_id=ADMIN_ID,[span_103](start_span)[span_103](end_span)
-                    document=message.document.file_id,[span_104](start_span)[span_104](end_span)
+            elif message.document:
+                await bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=message.document.file_id,
                     caption=caption_text,
-                    reply_markup=kb.as_markup(),[span_105](start_span)[span_105](end_span)
+                    reply_markup=kb.as_markup(),
                     parse_mode=ParseMode.HTML
                 )
             await message.answer("✅ Чек отправлен на проверку. Ссылки придут сразу после одобрения.")
-            await state.clear()[span_106](start_span)[span_106](end_span)
+            await state.clear()
         except Exception as e:
             logging.error(f"[{bot_name}] Ошибка пересылки чека: {e}")
 
-    # 12. ОДОБРЕНИЕ И ОТКЛОНЕНИЕ ЧЕКОВ
     @dp.callback_query(F.data.startswith("adm_appr_"))
     async def admin_approve(callback: types.CallbackQuery):
-        if callback.from_user.id != ADMIN_ID:[span_107](start_span)[span_107](end_span)
+        if callback.from_user.id != ADMIN_ID:
             return
         order_id = int(callback.data.split("_")[2])
 
-        async with aiosqlite.connect(db_path) as db:[span_108](start_span)[span_108](end_span)
-            async with db.execute("SELECT user_id, course_ids, status FROM orders WHERE id = ?", (order_id,)) as cur:[span_109](start_span)[span_109](end_span)
-                order = await cur.fetchone()[span_110](start_span)[span_110](end_span)
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute("SELECT user_id, course_ids, status FROM orders WHERE id = ?", (order_id,)) as cur:
+                order = await cur.fetchone()
 
-            if not order or order[2] == "paid":[span_111](start_span)[span_111](end_span)
-                await callback.answer("Заказ уже обработан.")[span_112](start_span)[span_112](end_span)
-                return[span_113](start_span)[span_113](end_span)
+            if not order or order[2] == "paid":
+                await callback.answer("Заказ уже обработан.")
+                return
 
-            user_id, ids = order[0], [int(x) for x in order[1].split(",")][span_114](start_span)[span_114](end_span)
-            placeholders = ",".join("?" for _ in ids)[span_115](start_span)[span_115](end_span)
-            async with db.execute(f"SELECT title, link FROM courses WHERE id IN ({placeholders})", ids) as cur:[span_116](start_span)[span_116](end_span)
-                courses = await cur.fetchall()[span_117](start_span)[span_117](end_span)
+            user_id, ids = order[0], [int(x) for x in order[1].split(",")]
+            placeholders = ",".join("?" for _ in ids)
+            async with db.execute(f"SELECT title, link FROM courses WHERE id IN ({placeholders})", ids) as cur:
+                courses = await cur.fetchall()
 
-            await db.execute("UPDATE orders SET status = 'paid' WHERE id = ?", (order_id,))[span_118](start_span)[span_118](end_span)
-            await db.commit()[span_119](start_span)[span_119](end_span)
+            await db.execute("UPDATE orders SET status = 'paid' WHERE id = ?", (order_id,))
+            await db.commit()
 
         try:
-            if len(courses) > 10:[span_120](start_span)[span_120](end_span)
-                content = f"ВАШИ КУРСЫ (ЗАКАЗ #{order_id})\n" + "=" * 35 + "\n\n[span_121](start_span)"[span_121](end_span)
-                content += "\n\n".join([f"{c[0]}:\n{c[1]}" for c in courses])[span_122](start_span)[span_122](end_span)
-                doc = types.BufferedInputFile(content.encode("utf-8"), filename=f"Order_{order_id}.txt")[span_123](start_span)[span_123](end_span)
-                await bot.send_document([span_124](start_span)[span_124](end_span)
-                    chat_id=user_id,[span_125](start_span)[span_125](end_span)
-                    document=doc,[span_126](start_span)[span_126](end_span)
-                    caption="🎉 Оплата подтверждена! Ваши курсы в файле выше.[span_127](start_span)"[span_127](end_span)
+            if len(courses) > 10:
+                content = f"ВАШИ КУРСЫ (ЗАКАЗ #{order_id})\n" + "=" * 35 + "\n\n"
+                content += "\n\n".join([f"{c[0]}:\n{c[1]}" for c in courses])
+                doc = types.BufferedInputFile(content.encode("utf-8"), filename=f"Order_{order_id}.txt")
+                await bot.send_document(
+                    chat_id=user_id,
+                    document=doc,
+                    caption="🎉 Оплата подтверждена! Ваши курсы в файле выше."
                 )
             else:
                 lines = [f"🎉 <b>Оплата подтверждена! Заказ #{order_id}:</b>\n"]
@@ -901,45 +885,45 @@ def create_bot_app(cfg: dict):
         except Exception as e:
             logging.error(f"[{bot_name}] Ошибка отправки ссылок: {e}")
 
-        base_caption = callback.message.caption or "[span_128](start_span)"[span_128](end_span)
+        base_caption = callback.message.caption or ""
         try:
-            await callback.message.edit_caption([span_129](start_span)[span_129](end_span)
+            await callback.message.edit_caption(
                 caption=base_caption + "\n\n🟢 <b>ОДОБРЕНО</b>",
-                reply_markup=None,[span_130](start_span)[span_130](end_span)
+                reply_markup=None,
                 parse_mode=ParseMode.HTML
             )
         except Exception:
             pass
-        await callback.answer("Доступ отправлен")[span_131](start_span)[span_131](end_span)
+        await callback.answer("Доступ отправлен")
 
     @dp.callback_query(F.data.startswith("adm_rejc_"))
     async def admin_reject(callback: types.CallbackQuery):
-        if callback.from_user.id != ADMIN_ID:[span_132](start_span)[span_132](end_span)
+        if callback.from_user.id != ADMIN_ID:
             return
         order_id = int(callback.data.split("_")[2])
-        async with aiosqlite.connect(db_path) as db:[span_133](start_span)[span_133](end_span)
-            async with db.execute("SELECT user_id FROM orders WHERE id = ?", (order_id,)) as cur:[span_134](start_span)[span_134](end_span)
-                order = await cur.fetchone()[span_135](start_span)[span_135](end_span)
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute("SELECT user_id FROM orders WHERE id = ?", (order_id,)) as cur:
+                order = await cur.fetchone()
         if order:
             try:
-                await bot.send_message(chat_id=order[0], text=f"❌ Оплата по заказу #{order_id} отклонена.")[span_136](start_span)[span_136](end_span)
+                await bot.send_message(chat_id=order[0], text=f"❌ Оплата по заказу #{order_id} отклонена.")
             except Exception:
                 pass
-        base_caption = callback.message.caption or "[span_137](start_span)"[span_137](end_span)
+        base_caption = callback.message.caption or ""
         try:
-            await callback.message.edit_caption([span_138](start_span)[span_138](end_span)
+            await callback.message.edit_caption(
                 caption=base_caption + "\n\n🔴 <b>ОТКЛОНЕНО</b>",
-                reply_markup=None,[span_139](start_span)[span_139](end_span)
+                reply_markup=None,
                 parse_mode=ParseMode.HTML
             )
         except Exception:
             pass
-        await callback.answer("Отклонено")[span_140](start_span)[span_140](end_span)
+        await callback.answer("Отклонено")
 
     return bot, dp, init_db
 
 async def main():
-    logging.basicConfig(level=logging.INFO)[span_141](start_span)[span_141](end_span)
+    logging.basicConfig(level=logging.INFO)
     tasks = []
     for cfg in BOT_CONFIGS:
         bot_inst, dp_inst, init_fn = create_bot_app(cfg)
@@ -950,4 +934,4 @@ async def main():
     await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
-    asyncio.run(main())[span_142](start_span)[span_142](end_span)
+    asyncio.run(main())
