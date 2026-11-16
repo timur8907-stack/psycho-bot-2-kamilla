@@ -98,9 +98,10 @@ def get_export_url(share_url: str) -> str:
 def sb_headers(prefer: str = None) -> dict:
     headers = {
         "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
     }
+    if SUPABASE_KEY.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
     if prefer:
         headers["Prefer"] = prefer
     return headers
