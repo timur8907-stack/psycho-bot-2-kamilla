@@ -421,6 +421,20 @@ def create_bot_app(cfg: dict):
             reply_markup=kb.as_markup()
         )
 
+    @dp.callback_query(F.data == "ask_support")
+    async def support_start_cb(callback: types.CallbackQuery, state: FSMContext):
+        await record_user(callback.from_user)
+        await state.set_state(SupportFSM.waiting_for_question)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data="cancel_support")
+        await callback.message.answer(
+            "💬 <b>Напишите ваш вопрос одним сообщением</b>\n\n"
+            "Можно прикрепить текст, скриншот или файл. Мы ответим вам прямо в этот чат.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+        await callback.answer()
+
     @dp.callback_query(F.data == "cancel_support")
     async def support_cancel(callback: types.CallbackQuery, state: FSMContext):
         await state.clear()
@@ -564,10 +578,7 @@ def create_bot_app(cfg: dict):
             f"Страница {page + 1} из {total_pages} (всего {len(courses)} курсов):\n\n"
             f"<i>Нажмите на курс, чтобы открыть описание, или отправьте нужные номера через запятую.</i>"
         )
-        if is_edit:
-            await target_fn(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
-        else:
-            await target_fn(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+        await target_fn(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
     @dp.callback_query(F.data == "cats_home")
     async def cats_home_cb(callback: types.CallbackQuery):
@@ -678,7 +689,12 @@ def create_bot_app(cfg: dict):
                 matches.append((cid, title, price))
 
         if not matches:
-            await message.answer("😔 По вашему запросу ничего не найдено. Попробуйте другое слово или откройте «📚 Каталог курсов».")
+            kb = InlineKeyboardBuilder()
+            kb.button(text="💬 Задать вопрос", callback_data="ask_support")
+            await message.answer(
+                "😔 По вашему запросу ничего не найдено. Попробуйте другое слово, откройте «📚 Каталог курсов» или напишите нам:",
+                reply_markup=kb.as_markup()
+            )
             return
 
         kb = InlineKeyboardBuilder()
@@ -731,6 +747,8 @@ def create_bot_app(cfg: dict):
     @dp.message(F.text.in_({"ℹ️ Как сделать заказ", "/help"}))
     async def help_cmd(message: types.Message):
         await record_user(message.from_user)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="💬 Задать вопрос", callback_data="ask_support")
         await message.answer(
             "🛒 <b>Как сделать заказ:</b>\n\n"
             "1️⃣ Выберите курс через <b>«📂 Категории»</b>, <b>«🔍 Поиск курса»</b> или файл <b>«📚 Каталог курсов»</b>.\n"
@@ -738,8 +756,9 @@ def create_bot_app(cfg: dict):
             "3️⃣ Бот рассчитает сумму и выдаст реквизиты.\n"
             "4️⃣ Оплатите и отправьте фото, скриншот или PDF-чек прямо сюда.\n"
             "5️⃣ После подтверждения оплаты ссылки придут в этот чат!\n\n"
-            "Если возник вопрос — нажмите <b>«💬 Задать вопрос»</b>.",
-            parse_mode=ParseMode.HTML
+            "Если возник вопрос — нажмите кнопку ниже 👇",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
         )
 
     # --- 7. УПРАВЛЕНИЕ СКИДКАМИ ---
